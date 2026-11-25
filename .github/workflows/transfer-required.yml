@@ -1,0 +1,46 @@
+name: Transfer verified Hearthless 0.1.3 release
+on:
+  push:
+    branches: [codex/required-release-transfer]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Reconstruct signed release assets and verify digests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xdelta3
+          repo="$GITHUB_REPOSITORY"
+          tag=hearthless-v0.1.3
+          draft="repos/$repo/releases/457713999"
+          test "$(gh api "$draft" --jq '.tag_name')" = "$tag"
+          test "$(gh api "$draft" --jq '.draft')" = true
+          mkdir old new
+          transfer() {
+            local name="$1" prev="$2" patch="$3" digest="$4"
+            local remote=$(gh api "$draft" --jq ".assets[] | select(.name == \"$name\") | .digest")
+            if [[ "$remote" == "sha256:$digest" ]]; then return; fi
+            test -z "$remote"
+            local id=$(gh api "$draft" --jq ".assets[] | select(.name == \"$patch\") | .id")
+            test -n "$id"
+            gh api -H 'Accept: application/octet-stream' "repos/$repo/releases/assets/$id" > "$patch"
+            gh release download hearthless-v0.1.2 --repo "$repo" --dir old --pattern "$prev"
+            xdelta3 -d -D -s "old/$prev" "$patch" "new/$name"
+            echo "$digest  new/$name" | sha256sum -c -
+            gh release upload "$tag" "new/$name" --repo "$repo"
+            test "$(gh api "$draft" --jq ".assets[] | select(.name == \"$name\") | .digest")" = "sha256:$digest"
+            rm "new/$name" "old/$prev" "$patch"
+          }
+          transfer Hearthless-win-Setup.exe Hearthless-win-Setup.exe win-installer.vcdiff 8d772e3177e92676b332025e2a43db0baa01bfa4dd853de663a80a920a7bdcab
+          transfer Hearthless-0.1.3-full.nupkg Hearthless-0.1.2-full.nupkg win-full.vcdiff ed4aff008d7e551d1bfa968f4b72c9b7376b7b33022d9b397fb14a5a31347af1
+          transfer Hearthless-osx-Portable.zip Hearthless-osx-Portable.zip osx-installer.vcdiff 7ebd193abc753009a102868021f023c4bc9449b3f844400b4f1338b5ce84362c
+          transfer Hearthless-0.1.3-osx-full.nupkg Hearthless-0.1.2-osx-full.nupkg osx-full.vcdiff 12665679ed41691e5ba9ae43197329316c7fbf690155a419339c8e1e7f6d265c
