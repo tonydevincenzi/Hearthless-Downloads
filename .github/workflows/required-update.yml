@@ -1,0 +1,59 @@
+name: Verify required update before Hearthless starts
+on:
+  push:
+    branches: [codex/windows-required-check]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Verify a required update and preserve the expedition
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'hearthless-gate'
+          $seed = "$root/seed"
+          $save = "$root/save"
+          $install = "$root/installed"
+          New-Item -ItemType Directory -Path "$seed/Game" -Force | Out-Null
+          Set-Location $root
+          gh release download hearthless-v0.1.3 --repo $env:GITHUB_REPOSITORY --pattern Hearthless-win-Setup.exe
+          if ($LASTEXITCODE) { throw 'Release download failed' }
+          $p = Start-Process "$root/Hearthless-win-Setup.exe" -ArgumentList '--silent' -Wait -PassThru
+          if ($p.ExitCode) { throw 'Installation failed' }
+          $real = "$env:LOCALAPPDATA/Hearthless/current"
+          $p = Start-Process "$real/Game/Hearthless.exe" -ArgumentList "--headless --log-file $root/before.log --quit-after 240 -- --run-write --test-root=$save" -Wait -PassThru
+          if ($p.ExitCode -or !(Select-String 'GODOT_RUN_PASS' "$root/before.log")) { throw 'Save fixture failed' }
+          $digest = (Get-FileHash "$save/expedition-v1.json").Hash
+          Copy-Item "$real/Hearthless.exe","$real/HearthlessUpdate.exe" $seed
+          # If the old game ever starts, it leaves a receipt even if the updater later replaces it.
+          $env:HEARTHLESS_PROBE = "$root/old-game-started"
+          $probe = 'class Probe { static void Main() { System.IO.File.WriteAllText(System.Environment.GetEnvironmentVariable("HEARTHLESS_PROBE"), "started"); } }'
+          Set-Content "$root/probe.cs" $probe
+          & "$env:SystemRoot/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /target:winexe "/out:$seed/Game/Hearthless.exe" "$root/probe.cs"
+          if ($LASTEXITCODE) { throw 'Probe compilation failed' }
+          dotnet tool install vpk --version 1.2.161 --tool-path "$root/tools"
+          if ($LASTEXITCODE) { throw 'Packager installation failed' }
+          & "$root/tools/vpk" pack --skip-updates --packId Hearthless --packVersion 0.1.0 --packDir $seed --mainExe Hearthless.exe --runtime win-x64 --channel win --outputDir "$root/out" --noPortable
+          if ($LASTEXITCODE) { throw 'Fixture packaging failed' }
+          $p = Start-Process "$root/out/Hearthless-win-Setup.exe" -ArgumentList "--silent --installto $install" -Wait -PassThru
+          if ($p.ExitCode) { throw 'Fixture installation failed' }
+          $p = Start-Process "$install/current/Hearthless.exe" -ArgumentList "--display-driver headless --log-file $root/after.log --quit-after 240 -- --run-read --test-root=$save" -PassThru
+          $statusFile = "$env:LOCALAPPDATA/Black Lantern Software/Hearthless Updater/update-window.txt"
+          $deadline = (Get-Date).AddMinutes(10)
+          $sawProgress = $false
+          do {
+            Start-Sleep -Milliseconds 500
+            if ((Test-Path $statusFile) -and ((Get-Content $statusFile -ErrorAction SilentlyContinue) -match 'Downloading Hearthless 0.1.3')) { $sawProgress = $true }
+            if (Test-Path $env:HEARTHLESS_PROBE) { throw 'Old game launched before required update' }
+            if ((Test-Path "$root/after.log") -and (Select-String 'GODOT_RUN_PASS 2' "$root/after.log" -Quiet)) { break }
+          } while ((Get-Date) -lt $deadline)
+          if (!$sawProgress -or !(Select-String 'GODOT_RUN_PASS 2' "$root/after.log")) { throw 'Update progress or automatic relaunch missing' }
+          if ((Get-FileHash "$save/expedition-v1.json").Hash -ne $digest) { throw 'Save changed' }
+          if (!(Select-String 'Installed 0.1.3' "$env:LOCALAPPDATA/Black Lantern Software/Hearthless Updater/last-launch.log")) { throw 'Incorrect final version' }
+          Write-Host 'PASS: native progress, no old game launch, automatic restart and original save intact.'
