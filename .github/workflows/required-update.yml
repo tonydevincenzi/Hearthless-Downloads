@@ -47,13 +47,15 @@ jobs:
           $statusFile = "$env:LOCALAPPDATA/Black Lantern Software/Hearthless Updater/update-window.txt"
           $deadline = (Get-Date).AddMinutes(10)
           $sawProgress = $false
+          $sawWindow = $false
           do {
             Start-Sleep -Milliseconds 500
             if ((Test-Path $statusFile) -and ((Get-Content $statusFile -ErrorAction SilentlyContinue) -match 'Downloading Hearthless 0.1.3')) { $sawProgress = $true }
+            if (Get-Process HearthlessUpdate -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq 'Hearthless Update' }) { $sawWindow = $true }
             if (Test-Path $env:HEARTHLESS_PROBE) { throw 'Old game launched before required update' }
             if ((Test-Path "$root/after.log") -and (Select-String 'GODOT_RUN_PASS 2' "$root/after.log" -Quiet)) { break }
           } while ((Get-Date) -lt $deadline)
-          if (!$sawProgress -or !(Select-String 'GODOT_RUN_PASS 2' "$root/after.log")) { throw 'Update progress or automatic relaunch missing' }
+          if (!$sawWindow -or !$sawProgress -or !(Select-String 'GODOT_RUN_PASS 2' "$root/after.log")) { throw 'Update progress or automatic relaunch missing' }
           if ((Get-FileHash "$save/expedition-v1.json").Hash -ne $digest) { throw 'Save changed' }
           if (!(Select-String 'Installed 0.1.3' "$env:LOCALAPPDATA/Black Lantern Software/Hearthless Updater/last-launch.log")) { throw 'Incorrect final version' }
           Write-Host 'PASS: native progress, no old game launch, automatic restart and original save intact.'
