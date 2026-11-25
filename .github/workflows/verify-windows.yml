@@ -37,6 +37,13 @@ jobs:
           $digest = (Get-FileHash "$save/expedition-v1.json").Hash
           Remove-Item Hearthless-Windows.zip
           Remove-Item -Recurse -Force "$root/HearthlessWindows"
+          $deadline = (Get-Date).AddMinutes(12)
+          do {
+            $names = gh release view $env:TAG --repo $env:REPO --json assets --jq '.assets[] | select(.state == "uploaded") | .name'
+            if ($LASTEXITCODE -ne 0) { throw 'Could not read release metadata' }
+            if ($names -contains 'Hearthless-win-Setup.exe') { break }
+            Start-Sleep -Seconds 20
+          } while ((Get-Date) -lt $deadline)
           gh release download $env:TAG --repo $env:REPO --pattern Hearthless-win-Setup.exe
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the installer' }
           $setup = Start-Process "$root/Hearthless-win-Setup.exe" -ArgumentList '--silent' -Wait -PassThru
