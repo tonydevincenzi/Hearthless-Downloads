@@ -40,8 +40,9 @@ jobs:
           Get-Content $log
           if (!(Select-String ' Ready ' $log)) { throw 'Launcher did not download the new build' }
           # Quit only the isolated game process after the launcher finishes downloading.
+          $gameExe = (Get-Item "$current/Game/Hearthless.exe").FullName
           $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($playing.Id)" |
-            Where-Object { $_.ExecutablePath -eq "$current/Game/Hearthless.exe" }
+            Where-Object { $_.ExecutablePath -eq $gameExe }
           if (!$child) { throw 'Game was not running during download' }
           Stop-Process -Id $child.ProcessId
           if (!$playing.WaitForExit(60000)) { throw 'Launcher did not release the installed files' }
