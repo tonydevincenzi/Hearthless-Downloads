@@ -1,0 +1,65 @@
+name: Verify Windows staged update
+on:
+  push:
+    branches: [codex/windows-staged-update-check]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  upgrade:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Apply a staged package through the real launcher and resume the expedition
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'hearthless-patch'
+          $seed = Join-Path $root 'fixture'
+          $game = Join-Path $seed 'Game'
+          $feed = Join-Path $root 'seed-release'
+          $install = Join-Path $root 'installed'
+          New-Item -ItemType Directory -Path $game,$feed | Out-Null
+          Set-Location $root
+          gh release download hearthless-v0.1.1 --repo $env:REPO --pattern Hearthless-win-Setup.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Missing production installer' }
+          $setup = Start-Process "$root/Hearthless-win-Setup.exe" -ArgumentList '--silent' -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Setup exit code $($setup.ExitCode)" }
+          $current = Join-Path $env:LOCALAPPDATA 'Hearthless/current'
+          $save = Join-Path $root 'save'
+          $writing = Start-Process "$current/Game/Hearthless.exe" -ArgumentList "--headless --log-file $root/before.log --quit-after 240 -- --run-write --test-root=$save" -Wait -PassThru
+          if ($writing.ExitCode -ne 0 -or !(Select-String 'GODOT_RUN_PASS' "$root/before.log")) { throw 'Save fixture failed' }
+          $digest = (Get-FileHash "$save/expedition-v1.json").Hash
+          Copy-Item "$current/Hearthless.exe" "$seed/Hearthless.exe"
+          # This test-only old installation uses cmd as a tiny child. The real, unchanged
+          # release launcher checks the public feed and replaces it with the actual game.
+          Copy-Item "$env:WINDIR/System32/cmd.exe" "$game/Hearthless.exe"
+          Remove-Item "$root/Hearthless-win-Setup.exe"
+          dotnet tool install vpk --version 1.2.161 --tool-path "$root/tools"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install pinned packager' }
+          & "$root/tools/vpk.exe" pack --skip-updates --packId Hearthless --packVersion 0.0.1 --packDir $seed --mainExe Hearthless.exe --runtime win-x64 --channel win --outputDir $feed --noPortable
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture packaging failed' }
+          $p = Start-Process "$feed/Hearthless-win-Setup.exe" -ArgumentList "--silent --installto $install" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw 'Fixture setup failed' }
+          $launcher = "$install/current/Hearthless.exe"
+          $log = "$env:LOCALAPPDATA/Black Lantern Software/Hearthless Updater/last-launch.log"
+          # Simulate a completed download waiting on exit. Use the actual full nupkg
+          # left by the production installer, whose checksum was verified at release.
+          $pkg = Get-ChildItem "$env:LOCALAPPDATA/Hearthless/packages/*-0.1.1-full.nupkg" | Select-Object -First 1
+          if (!$pkg) { throw 'Missing verified installed package' }
+          Copy-Item $pkg.FullName "$install/packages/"
+          $first = Start-Process $launcher -ArgumentList "--headless --log-file $root/restart.log --quit-after 240 -- --run-read --test-root=$save" -Wait -PassThru
+          if ($first.ExitCode -ne 0) { throw 'Could not apply pending update on launch' }
+          $deadline = (Get-Date).AddMinutes(5)
+          do {
+            Start-Sleep -Seconds 2
+            if ((Test-Path "$root/restart.log") -and (Select-String 'GODOT_RUN_PASS 2' "$root/restart.log")) { break }
+          } while ((Get-Date) -lt $deadline)
+          if (!(Test-Path "$root/restart.log") -or !(Select-String 'GODOT_RUN_PASS 2' "$root/restart.log")) { throw 'Updated game was not relaunched with its save' }
+          if (!(Test-Path "$install/current/Game/Hearthless.pck")) { throw 'Real update was not applied on exit' }
+          if ((Get-FileHash "$save/expedition-v1.json").Hash -ne $digest) { throw 'The update changed the save' }
+          Get-Content $log
+          Get-Content "$root/restart.log" | Select-String 'RUN_PASS'
