@@ -17,7 +17,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:RUNNER_TEMP 'hearthless-gate'
-          $seed = "$root/seed"
+          $seed = Join-Path $root seed
           $save = "$root/save"
           $install = "$root/installed"
           New-Item -ItemType Directory -Path "$seed/Game" -Force | Out-Null
@@ -35,7 +35,7 @@ jobs:
           $env:HEARTHLESS_PROBE = "$root/old-game-started"
           $probe = 'class Probe { static void Main() { System.IO.File.WriteAllText(System.Environment.GetEnvironmentVariable("HEARTHLESS_PROBE"), "started"); } }'
           Set-Content "$root/probe.cs" $probe
-          & "$env:SystemRoot/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /target:winexe "/out:$seed/Game/Hearthless.exe" "$root/probe.cs"
+          & "$env:SystemRoot/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /target:winexe "/out:$seed\Game\Hearthless.exe" "probe.cs"
           if ($LASTEXITCODE) { throw 'Probe compilation failed' }
           dotnet tool install vpk --version 1.2.161 --tool-path "$root/tools"
           if ($LASTEXITCODE) { throw 'Packager installation failed' }
