@@ -1,0 +1,49 @@
+name: Verify Windows download
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Hearthless release tag
+        required: true
+        default: hearthless-v0.1.1
+  push:
+    branches: [codex/windows-installer-check]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Install the staged Windows edition and resume a legacy expedition
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag || 'hearthless-v0.1.1' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'hearthless-check'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          Set-Location $root
+          # Generate a save with the real public ZIP, before the updater is installed.
+          gh release download alpha-2026-11-24-intro --repo $env:REPO --pattern Hearthless-Windows.zip
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the original ZIP' }
+          tar -xf Hearthless-Windows.zip
+          if ($LASTEXITCODE -ne 0) { throw 'Could not extract the original ZIP' }
+          $save = Join-Path $root 'save'
+          $old = Start-Process "$root/HearthlessWindows/Hearthless.exe" -ArgumentList "--headless --log-file $root/old.log --quit-after 240 -- --run-write --test-root=$save" -Wait -PassThru
+          if ($old.ExitCode -ne 0 -or !(Select-String 'GODOT_RUN_PASS' "$root/old.log")) { throw 'Legacy save fixture failed' }
+          $digest = (Get-FileHash "$save/expedition-v1.json").Hash
+          Remove-Item Hearthless-Windows.zip
+          Remove-Item -Recurse -Force "$root/HearthlessWindows"
+          gh release download $env:TAG --repo $env:REPO --pattern Hearthless-win-Setup.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the installer' }
+          $setup = Start-Process "$root/Hearthless-win-Setup.exe" -ArgumentList '--silent' -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Setup exit code $($setup.ExitCode)" }
+          $launcher = "$env:LOCALAPPDATA/Hearthless/current/Hearthless.exe"
+          $game = Start-Process $launcher -ArgumentList "--headless --log-file $root/new.log --quit-after 240 -- --run-read --test-root=$save" -Wait -PassThru
+          if ($game.ExitCode -ne 0 -or !(Select-String 'GODOT_RUN_PASS 2' "$root/new.log")) { throw 'Installed launcher failed to resume the expedition' }
+          if ((Get-FileHash "$save/expedition-v1.json").Hash -ne $digest) { throw 'Save changed during installation or load' }
+          Get-Content "$env:LOCALAPPDATA/Black Lantern Software/Hearthless Updater/last-launch.log"
+          Get-Content "$root/new.log" | Select-String 'RUN_PASS'
