@@ -1,0 +1,46 @@
+name: Transfer verified Hearthless Mac release
+on:
+  push:
+    branches: [codex/mac-release-transfer]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Reconstruct and verify exact notarized release files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xdelta3
+          repo="$GITHUB_REPOSITORY"
+          tag=hearthless-v0.1.2
+          draft="repos/$repo/releases/457676065"
+          test "$(gh api "$draft" --jq '.tag_name')" = "$tag"
+          test "$(gh api "$draft" --jq '.draft')" = true
+          for part in package portable; do
+            id=$(gh api "$draft" --jq ".assets[] | select(.name == \"$part-012.vcdiff\") | .id")
+            test -n "$id"
+            gh api -H 'Accept: application/octet-stream' "repos/$repo/releases/assets/$id" > "$part-012.vcdiff"
+          done
+          mkdir old new
+          gh release download hearthless-v0.1.1 --repo "$repo" --dir old --pattern Hearthless-osx-Portable.zip --pattern Hearthless-0.1.1-osx-full.nupkg
+          xdelta3 -d -D -s old/Hearthless-0.1.1-osx-full.nupkg package-012.vcdiff new/Hearthless-0.1.2-osx-full.nupkg
+          xdelta3 -d -D -s old/Hearthless-osx-Portable.zip portable-012.vcdiff new/Hearthless-osx-Portable.zip
+          cd new
+          sha256sum --check <<'DIGESTS'
+          c1facd78dfc952bfed02fd0dbe5ded050b1b703ebb9ad7c6a172897c94b3d7fb  Hearthless-0.1.2-osx-full.nupkg
+          7ca3f063d37025f2bc9da27af78e7ae262f3aa408fc9976c29255375ce631c5d  Hearthless-osx-Portable.zip
+          DIGESTS
+          for file in Hearthless-0.1.2-osx-full.nupkg Hearthless-osx-Portable.zip; do
+            remote=$(gh api "$draft" --jq ".assets[] | select(.name == \"$file\") | .digest")
+            if [[ -z "$remote" ]]; then gh release upload "$tag" "$file" --repo "$repo"; fi
+            expected="sha256:$(sha256sum "$file" | cut -d' ' -f1)"
+            test "$(gh api "$draft" --jq ".assets[] | select(.name == \"$file\") | .digest")" = "$expected"
+          done
