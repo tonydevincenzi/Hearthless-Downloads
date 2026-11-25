@@ -18,13 +18,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:RUNNER_TEMP 'hearthless-patch'
-          $seed = Join-Path $root 'fixture'
-          $game = Join-Path $seed 'Game'
-          $feed = Join-Path $root 'seed-release'
-          $install = Join-Path $root 'installed'
-          New-Item -ItemType Directory -Path $game,$feed | Out-Null
+          New-Item -ItemType Directory -Path $root | Out-Null
           Set-Location $root
-          gh release download --repo $env:REPO --pattern Hearthless-win-Setup.exe
+          gh release download hearthless-v0.1.1 --repo $env:REPO --pattern Hearthless-win-Setup.exe
           if ($LASTEXITCODE -ne 0) { throw 'Missing production installer' }
           $setup = Start-Process "$root/Hearthless-win-Setup.exe" -ArgumentList '--silent' -Wait -PassThru
           if ($setup.ExitCode -ne 0) { throw "Setup exit code $($setup.ExitCode)" }
@@ -33,20 +29,9 @@ jobs:
           $writing = Start-Process "$current/Game/Hearthless.exe" -ArgumentList "--headless --log-file $root/before.log --quit-after 240 -- --run-write --test-root=$save" -Wait -PassThru
           if ($writing.ExitCode -ne 0 -or !(Select-String 'GODOT_RUN_PASS' "$root/before.log")) { throw 'Save fixture failed' }
           $digest = (Get-FileHash "$save/expedition-v1.json").Hash
-          Copy-Item "$current/Hearthless.exe" "$seed/Hearthless.exe"
-          # This test-only old installation uses cmd as a tiny child. The real, unchanged
-          # release launcher checks the public feed and replaces it with the actual game.
-          Copy-Item "$env:WINDIR/System32/cmd.exe" "$game/Hearthless.exe"
-          Remove-Item "$root/Hearthless-win-Setup.exe"
-          dotnet tool install vpk --version 1.2.161 --tool-path "$root/tools"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not install pinned packager' }
-          & "$root/tools/vpk.exe" pack --skip-updates --packId Hearthless --packVersion 0.0.1 --packDir $seed --mainExe Hearthless.exe --runtime win-x64 --channel win --outputDir $feed --noPortable
-          if ($LASTEXITCODE -ne 0) { throw 'Fixture packaging failed' }
-          $p = Start-Process "$feed/Hearthless-win-Setup.exe" -ArgumentList "--silent --installto $install" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw 'Fixture setup failed' }
-          $launcher = "$install/current/Hearthless.exe"
+          $launcher = "$current/Hearthless.exe"
           $log = "$env:LOCALAPPDATA/Black Lantern Software/Hearthless Updater/last-launch.log"
-          $playing = Start-Process $launcher -ArgumentList '/d /c ping -n 601 127.0.0.1' -PassThru
+          $playing = Start-Process $launcher -ArgumentList "--headless -- --test-root=$save" -PassThru
           $deadline = (Get-Date).AddMinutes(9)
           do {
             Start-Sleep -Seconds 3
@@ -54,20 +39,22 @@ jobs:
           } while ((Get-Date) -lt $deadline -and !$playing.HasExited)
           Get-Content $log
           if (!(Select-String ' Ready ' $log)) { throw 'Launcher did not download the new build' }
-          # Stop only the disposable fixture child, just as a player quitting would.
+          # Quit only the isolated game process after the launcher finishes downloading.
           $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($playing.Id)" |
-            Where-Object { $_.ExecutablePath -eq "$install/current/Game/Hearthless.exe" }
-          if (!$child) { throw 'Fixture child was not running during download' }
+            Where-Object { $_.ExecutablePath -eq "$current/Game/Hearthless.exe" }
+          if (!$child) { throw 'Game was not running during download' }
           Stop-Process -Id $child.ProcessId
           if (!$playing.WaitForExit(60000)) { throw 'Launcher did not release the installed files' }
           $deadline = (Get-Date).AddMinutes(4)
           do {
             Start-Sleep -Seconds 2
-            if (Test-Path "$install/current/Game/Hearthless.pck") { break }
+            $installedVersion = if (Test-Path "$current/sq.version") { ([xml](Get-Content "$current/sq.version" -Raw)).package.metadata.version }
+            if ($installedVersion -eq '0.1.2') { break }
           } while ((Get-Date) -lt $deadline)
-          if (!(Test-Path "$install/current/Game/Hearthless.pck")) { throw 'Real update was not applied on exit' }
+          if ($installedVersion -ne '0.1.2') { throw 'Update was not installed on exit' }
           $reading = Start-Process $launcher -ArgumentList "--headless --log-file $root/after.log --quit-after 240 -- --run-read --test-root=$save" -Wait -PassThru
           if ($reading.ExitCode -ne 0 -or !(Select-String 'GODOT_RUN_PASS 2' "$root/after.log")) { throw 'Patched build failed to load the expedition' }
           if ((Get-FileHash "$save/expedition-v1.json").Hash -ne $digest) { throw 'The patch changed the save' }
+          if (!(Select-String 'Installed 0.1.2' $log)) { throw 'Updated launcher did not confirm its version' }
           Get-Content $log
           Get-Content "$root/after.log" | Select-String 'RUN_PASS'
